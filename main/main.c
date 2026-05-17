@@ -220,7 +220,7 @@ static void led_status_task(void* p) {
     #endif
 
     // Debounce / filtro: só muda o estado quando o nível ficar estável.
-    bool conectado = false;
+    bool conectado;
     bool last_raw = gpio_get(HC06_STATE_PIN);
     int stable = 0;
 
@@ -357,7 +357,7 @@ void oled_init(void) {
 static void oled_btn_task(void* p) {
     oled_init();
     
-    int pin_bluetooth = 0000; 
+    int pin_bluetooth; 
     bool estado_anterior_btn = true; 
 
     // Limpa a tela inicial
