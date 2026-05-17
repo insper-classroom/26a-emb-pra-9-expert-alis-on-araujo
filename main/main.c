@@ -34,9 +34,6 @@ QueueHandle_t xQueueRX;
 QueueHandle_t xQueueTX;
 QueueHandle_t xQueueADC;
 
-// Atualizado sempre que chega algo do HC-06 (inclui heartbeat 0x00).
-static volatile uint32_t g_hc06_last_rx_ms = 0;
-
 ssd1306_t disp;
 
 const uint BTN = 6;
@@ -210,6 +207,8 @@ void init_uart_irq() {
 }
 
 static void led_status_task(void* p) {
+    // Fila (len=1) que recebe o TickType_t da última atividade RX do HC-06
+    QueueHandle_t q_last_rx = (QueueHandle_t)p;
     // 1. Configura o pino STATE como entrada
     gpio_init(HC06_STATE_PIN);
     gpio_set_dir(HC06_STATE_PIN, GPIO_IN);
@@ -244,11 +243,18 @@ static void led_status_task(void* p) {
     int brilho = 0;
     int passo = 5; // O quão rápido a luz aumenta/diminui
 
+    TickType_t last_rx_tick = 0;
     while (true) {
         // Método alternativo: considera "conectado" se houve tráfego RX recentemente.
-        // (o terminal Python pode mandar heartbeat 0x00 para manter isso vivo)
-        uint32_t now_ms = (uint32_t)to_ms_since_boot(get_absolute_time());
-        bool conectado_sw = (g_hc06_last_rx_ms != 0) && ((now_ms - g_hc06_last_rx_ms) < 1200);
+        // (o terminal Python manda heartbeat 0x00 para manter isso vivo)
+        TickType_t tick_now = xTaskGetTickCount();
+        TickType_t tick_tmp;
+        if (q_last_rx != NULL) {
+            while (xQueueReceive(q_last_rx, &tick_tmp, 0) == pdTRUE) {
+                last_rx_tick = tick_tmp;
+            }
+        }
+        bool conectado_sw = (last_rx_tick != 0) && ((tick_now - last_rx_tick) < pdMS_TO_TICKS(HC06_RX_ACTIVITY_CONNECTED_MS));
 
         bool raw = gpio_get(HC06_STATE_PIN);
         if (raw == last_raw) {
@@ -304,6 +310,8 @@ static void tx_task(void* p) {
 }
 
 static void serial_task(void* p) {
+    // Fila (len=1) que recebe o TickType_t da última atividade RX do HC-06
+    QueueHandle_t q_last_rx = (QueueHandle_t)p;
     uint8_t ch;
     while (true) {
         int c = getchar_timeout_us(0);
@@ -313,7 +321,11 @@ static void serial_task(void* p) {
         }
 
         while (xQueueReceive(xQueueRX, &ch, 0) == pdTRUE) {
-            g_hc06_last_rx_ms = (uint32_t)to_ms_since_boot(get_absolute_time());
+            if (q_last_rx != NULL) {
+                TickType_t t = xTaskGetTickCount();
+                // Queue len=1: mantém sempre o valor mais recente
+                xQueueOverwrite(q_last_rx, &t);
+            }
             // Heartbeat: não imprime no terminal.
             if (ch == 0x00) continue;
             putchar_raw(ch);
@@ -427,10 +439,13 @@ int main(void) {
     xQueueTX = xQueueCreate(256, sizeof(uint8_t));
     xQueueADC = xQueueCreate(10, sizeof(joystick_data));
 
+    // Fila para sinalizar "atividade RX" (detecção de conexão por software)
+    QueueHandle_t q_last_rx = xQueueCreate(1, sizeof(TickType_t));
+
     xTaskCreate(tx_task, "TX", 512, NULL, 2, NULL);
-    xTaskCreate(serial_task, "Serial", 1024, NULL, 1, NULL);
+    xTaskCreate(serial_task, "Serial", 1024, q_last_rx, 1, NULL);
     xTaskCreate(oled_btn_task, "OLED_BTN", 1024, NULL, 1, NULL);
-    xTaskCreate(led_status_task, "LED_STATUS", 256, NULL, 1, NULL);
+    xTaskCreate(led_status_task, "LED_STATUS", 256, q_last_rx, 1, NULL);
     xTaskCreate(x_task, "Eixo_X", 1024, NULL, 1, NULL);
     xTaskCreate(y_task, "Eixo_Y", 1024, NULL, 1, NULL);
     xTaskCreate(click_task, "Clique", 1024, NULL, 1, NULL);
